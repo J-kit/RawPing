@@ -1,9 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+
 using System;
+
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Threading;
+
 /// <summary>
 /// Source http://www.codeplanet.eu/tutorials/csharp/4-tcp-ip-socket-programmierung-in-csharp.html?start=4
 /// </summary>
@@ -12,142 +18,83 @@ namespace RawPing.Utils
 	/// <summary>
 	/// Implementierung eines Pings in C#.
 	/// </summary>
-	class MyPing
+	internal class MyPing
 	{
-		const int SOCKET_ERROR = -1;
-		const int ICMP_ECHO = 8;
+		private const int SOCKET_ERROR = -1;
+		private const int ICMP_ECHO = 8;
+
+		private Action<IPAddress> OnPingReceive;
+		private IcmpPacket packet;// = new IcmpPacket();
+		private Socket socket;//= new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Icmp);
+		private int intCount = 0;
+
+		public MyPing(Action<IPAddress> onPingReceive)
+		{
+			OnPingReceive = onPingReceive;
+			packet = new IcmpPacket();
+			socket = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Icmp);
+		}
+
+		public void EnqueueIP(IPAddress input)
+		{
+			EndPoint epServer = (new IPEndPoint(input, 0));
+			socket.BeginSendTo(packet.Buf, 0, packet.Size, SocketFlags.None, epServer, null, null);
+			Thread.Sleep(1);
+			if (intCount < 20)
+			{
+				byte[] ReceiveBuffer = new byte[256];
+				socket.BeginReceive(ReceiveBuffer, 0, ReceiveBuffer.Length, SocketFlags.None, ReceiveCallback, ReceiveBuffer);
+				intCount++;
+			}
+		}
+
+		private void ReceiveCallback(IAsyncResult x)
+		{
+			var ReceiveBuffer = x.AsyncState as byte[];
+			if (OnPingReceive != null)
+			{
+				var ipP = new byte[4];
+				Array.Copy(ReceiveBuffer, 12, ipP, 0, 4);
+				var dstip = new IPAddress(ipP);
+				OnPingReceive(dstip);
+			}
+			socket.BeginReceive(ReceiveBuffer, 0, ReceiveBuffer.Length, SocketFlags.None, ReceiveCallback, ReceiveBuffer);
+		}
 
 		public int GetPingTime(string host)
 		{
-			int nBytes = 0, dwStart = 0, dwStop = 0, PingTime = 0;
+			if (host == null) return -1;
 
-			IPHostEntry serverHE, fromHE;
-			IcmpPacket packet = new IcmpPacket();
-
-			if (host == null)
-				return -1;
-
-			// Einen Raw-Socket erstellen.
-			Socket socket = new Socket(AddressFamily.InterNetwork,
-									   SocketType.Raw,
-									   ProtocolType.Icmp);
-
-			serverHE = Dns.GetHostEntry(host);
-
-			if (serverHE == null)
-			{
-				return -1; // Fehler
-			}
+			IPHostEntry serverHE = Dns.GetHostEntry(host);
+			if (serverHE == null) return -1; // Fehler
 
 			// Den IPEndPoint des Servers in einen EndPoint konvertieren.
-			IPEndPoint ipepServer = new IPEndPoint(serverHE.AddressList[0], 0);
-			EndPoint epServer = (ipepServer);
+			EndPoint epServer = (new IPEndPoint(serverHE.AddressList[0], 0));
 
-			// Den empfangenen Endpunkt für den Client-Rechner setzen.
-			fromHE = Dns.GetHostEntry(Dns.GetHostName());
-			IPEndPoint ipEndPointFrom = new IPEndPoint(fromHE.AddressList.Where(m=>m.AddressFamily != AddressFamily.InterNetworkV6).FirstOrDefault(), 0);
-			EndPoint EndPointFrom = (ipEndPointFrom);
+			socket.BeginSendTo(packet.Buf, 0, packet.Size, SocketFlags.None, epServer, null, null);
 
-			int PacketSize = 0;
-
-			for (int j = 0; j < 1; j++)
+			// Initialisiere den Buffer. Der Empfänger-Buffer ist die Größe des
+			// ICMP Header plus den IP Header (20 bytes)
+			byte[] ReceiveBuffer = new byte[256];
+			socket.BeginReceive(ReceiveBuffer, 0, ReceiveBuffer.Length, SocketFlags.None, x =>
 			{
-				// Das zu sendende Paket erstellen.
-				packet.Type = ICMP_ECHO;
-				packet.SubCode = 0;
-				packet.CheckSum = UInt16.Parse("0");
-				packet.Identifier = UInt16.Parse("45");
-				packet.SequenceNumber = UInt16.Parse("0");
+				var buf = x.AsyncState as byte[];
+				var ipP = new byte[4];
+				Array.Copy(buf, 12, ipP, 0, 4);
+				var dstip = new IPAddress(ipP);
+				Debugger.Break();
+			}, ReceiveBuffer);
 
-				int PingData = 32;
-				packet.Data = new byte[PingData];
+			//IPAddress.Parse(ReceiveBuffer);
+			Console.ReadLine();
 
-				for (int i = 0; i < PingData; i++)
-					packet.Data[i] = (byte)'#';
-
-				PacketSize = PingData + 8;
-
-
-				// Stelle sicher dass das icmp_pkt_buffer Byte Array 
-				// eine gerade Zahl ist.
-				if (PacketSize % 2 == 1)
-					++PacketSize;
-
-				byte[] icmp_pkt_buffer = new byte[PacketSize];
-
-				int index = 0;
-
-				index = Serialize(packet,
-								  icmp_pkt_buffer,
-								  PacketSize,
-								  PingData);
-
-				if (index == -1)
-					return -1;
-
-				// Die Prüfsumme für das Paket berechnen.
-				double double_length = Convert.ToDouble(index);
-
-				double dtemp = Math.Ceiling(double_length / 2);
-
-				int cksum_buffer_length = Convert.ToInt32(dtemp);
-
-				UInt16[] cksum_buffer = new UInt16[cksum_buffer_length];
-
-				int icmp_header_buffer_index = 0;
-
-				for (int i = 0; i < cksum_buffer_length; i++)
-				{
-					cksum_buffer[i] = BitConverter.ToUInt16(icmp_pkt_buffer, icmp_header_buffer_index);
-					icmp_header_buffer_index += 2;
-				}
-
-				UInt16 u_cksum = checksum(cksum_buffer, cksum_buffer_length);
-				packet.CheckSum = u_cksum;
-
-				// Nachdem nun die Prüfsumme vorhanden ist, das Paket erneut serialisieren.
-				byte[] sendbuf = new byte[PacketSize];
-
-				index = Serialize(packet,
-								  sendbuf,
-								  PacketSize,
-								  PingData);
-
-				if (index == -1)
-					return -1;
-
-				dwStart = System.Environment.TickCount; // Starte den Timer
-
-				if ((nBytes = socket.SendTo(sendbuf, PacketSize, 0, epServer)) == SOCKET_ERROR)
-				{
-					Console.WriteLine("Error calling sendto");
-					return -1; // Fehler
-				}
-
-				// Initialisiere den Buffer. Der Empfänger-Buffer ist die Größe des
-				// ICMP Header plus den IP Header (20 bytes)
-				byte[] ReceiveBuffer = new byte[256];
-
-				nBytes = 0;
-				nBytes = socket.ReceiveFrom(ReceiveBuffer, 256, 0, ref EndPointFrom);
-
-				if (nBytes == SOCKET_ERROR)
-				{
-					dwStop = SOCKET_ERROR;
-				}
-				else
-				{
-					// Stoppe den Timer
-					dwStop = System.Environment.TickCount - dwStart;
-				}
-			}
-
-			socket.Close();
-			PingTime = (int)dwStop;
-			return PingTime;
+			return 0;
 		}
+	}
 
-		private static int Serialize(IcmpPacket packet, byte[] Buffer, int PacketSize, int PingData)
+	public class Utils
+	{
+		public static int Serialize(IcmpPacket packet, byte[] Buffer, int PacketSize, int PingData)
 		{
 			int cbReturn = 0;
 
@@ -199,7 +146,7 @@ namespace RawPing.Utils
 			return cbReturn;
 		}
 
-		private static UInt16 checksum(UInt16[] buffer, int size)
+		public static UInt16 checksum(UInt16[] buffer, int size)
 		{
 			int cksum = 0;
 			int counter;
@@ -221,6 +168,59 @@ namespace RawPing.Utils
 		}
 	}
 
+	public class IcmpPacketWrapper
+	{
+		public byte[] Buf;
+		public int Size;
+
+		private const int SOCKET_ERROR = -1;
+		private const int ICMP_ECHO = 8;
+
+		public IcmpPacketWrapper()
+		{
+			int PingData = 32;
+			int PacketSize = PingData + 8;
+			int icmp_header_buffer_index = 0;
+
+			// Das zu sendende Paket erstellen.
+			IcmpPacket packet = new IcmpPacket()
+			{
+				Type = ICMP_ECHO,
+				SubCode = 0,
+				CheckSum = UInt16.Parse("0"),
+				Identifier = UInt16.Parse("45"),
+				SequenceNumber = UInt16.Parse("0"),
+				Data = new byte[PingData].Select(m => (byte)'#').ToArray()
+			};
+
+			// Stelle sicher dass das icmp_pkt_buffer Byte Array
+			// eine gerade Zahl ist.
+			if (PacketSize % 2 == 1) ++PacketSize;
+
+			byte[] icmp_pkt_buffer = new byte[PacketSize];
+			int index = Utils.Serialize(packet, icmp_pkt_buffer, PacketSize, PingData);
+			if (index == -1) return;
+
+			// Die Prüfsumme für das Paket berechnen.
+			int cksum_buffer_length = Convert.ToInt32(Math.Ceiling(Convert.ToDouble(index) / 2));
+			UInt16[] cksum_buffer = new UInt16[cksum_buffer_length];
+
+			for (int i = 0; i < cksum_buffer_length; i++)
+			{
+				cksum_buffer[i] = BitConverter.ToUInt16(icmp_pkt_buffer, icmp_header_buffer_index);
+				icmp_header_buffer_index += 2;
+			}
+
+			packet.CheckSum = Utils.checksum(cksum_buffer, cksum_buffer_length);
+
+			// Nachdem nun die Prüfsumme vorhanden ist, das Paket erneut serialisieren.
+			byte[] sendbuf = new byte[PacketSize];
+			if (Utils.Serialize(packet, sendbuf, PacketSize, PingData) == -1) return;
+			Buf = sendbuf;
+			Size = PacketSize;
+		}
+	}
+
 	public class IcmpPacket
 	{
 		public byte Type;               // Message Typ
@@ -228,7 +228,56 @@ namespace RawPing.Utils
 		public byte[] Data;             // Byte Array
 		public UInt16 CheckSum;         // Checksumme
 		public UInt16 Identifier;       // Identifizierer
-		public UInt16 SequenceNumber;   // Sequenznummer 
+		public UInt16 SequenceNumber;   // Sequenznummer
+
+		public byte[] Buf;
+		public int Size;
+		private const int SOCKET_ERROR = -1;
+		private const int ICMP_ECHO = 8;
+
+		public IcmpPacket(bool doInit = true)
+		{
+			// Das zu sendende Paket erstellen.
+
+			int PingData = 32;
+			int PacketSize = PingData + 8;
+			int icmp_header_buffer_index = 0;
+
+			if (doInit)
+			{
+				Type = ICMP_ECHO;
+				SubCode = 0;
+				CheckSum = UInt16.Parse("0");
+				Identifier = UInt16.Parse("45");
+				SequenceNumber = UInt16.Parse("0");
+				Data = new byte[PingData].Select(m => (byte)'#').ToArray();
+			}
+
+			// Stelle sicher dass das icmp_pkt_buffer Byte Array
+			// eine gerade Zahl ist.
+			if (PacketSize % 2 == 1) ++PacketSize;
+
+			byte[] icmp_pkt_buffer = new byte[PacketSize];
+			int index = Utils.Serialize(this, icmp_pkt_buffer, PacketSize, PingData);
+			if (index == -1) return;
+
+			// Die Prüfsumme für das Paket berechnen.
+			int cksum_buffer_length = Convert.ToInt32(Math.Ceiling(Convert.ToDouble(index) / 2));
+			UInt16[] cksum_buffer = new UInt16[cksum_buffer_length];
+
+			for (int i = 0; i < cksum_buffer_length; i++)
+			{
+				cksum_buffer[i] = BitConverter.ToUInt16(icmp_pkt_buffer, icmp_header_buffer_index);
+				icmp_header_buffer_index += 2;
+			}
+
+			this.CheckSum = Utils.checksum(cksum_buffer, cksum_buffer_length);
+
+			// Nachdem nun die Prüfsumme vorhanden ist, das Paket erneut serialisieren.
+			byte[] sendbuf = new byte[PacketSize];
+			if (Utils.Serialize(this, sendbuf, PacketSize, PingData) == -1) return;
+			Buf = sendbuf;
+			Size = PacketSize;
+		}
 	}
 }
-
